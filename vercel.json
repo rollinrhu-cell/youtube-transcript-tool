@@ -1,0 +1,8 @@
+{
+  "framework": "nextjs",
+  "functions": {
+    "src/app/api/transcript/route.ts": {
+      "maxDuration": 300
+    }
+  }
+}
