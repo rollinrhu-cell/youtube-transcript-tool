@@ -3,8 +3,17 @@ import Anthropic from "@anthropic-ai/sdk";
 export const maxDuration = 300;
 
 // ---------------------------------------------------------------------------
-// YouTube innertube API – much more reliable than page-scraping
+// YouTube transcript extraction
+// Mirrors the approach used by youtube-transcript-api v1.2.4:
+//   1. Fetch the watch page to extract the innertube API key + detect consent
+//   2. POST to /youtubei/v1/player?key=... using the ANDROID client
+//      (ANDROID bypasses consent gating; WEB client is blocked more aggressively)
+//   3. Skip any caption tracks that require a PO Token (&exp=xpe)
+//   4. Fetch and parse the timedtext XML
 // ---------------------------------------------------------------------------
+
+// Well-known fallback key — extracted dynamically from the page at runtime
+const FALLBACK_INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
 
 interface TranscriptItem {
   text: string;
@@ -15,6 +24,7 @@ interface TranscriptItem {
 interface CaptionTrack {
   baseUrl: string;
   languageCode: string;
+  kind?: string; // "asr" = auto-generated
 }
 
 function decodeHtmlEntities(text: string): string {
@@ -28,44 +38,103 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&apos;/g, "'");
 }
 
+class VideoUnavailableError extends Error {
+  constructor(videoId: string) {
+    super(`Video unavailable: ${videoId}`);
+  }
+}
+class TranscriptsDisabledError extends Error {
+  constructor(videoId: string) {
+    super(`Transcripts disabled: ${videoId}`);
+  }
+}
+class TranscriptsNotAvailableError extends Error {
+  constructor(videoId: string) {
+    super(`No transcripts available: ${videoId}`);
+  }
+}
+class IpBlockedError extends Error {
+  constructor() {
+    super("IP blocked by YouTube");
+  }
+}
+class PoTokenRequiredError extends Error {
+  constructor(videoId: string) {
+    super(`PO Token required: ${videoId}`);
+  }
+}
+
 async function fetchYouTubeTranscript(
   videoId: string
 ): Promise<TranscriptItem[]> {
-  // Step 1: Ask the innertube player API for video metadata (includes caption tracks)
-  const playerRes = await fetch("https://www.youtube.com/youtubei/v1/player", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      // Modern Chrome UA – YouTube serves different responses to old UAs
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-      "Accept-Language": "en-US,en;q=0.9",
-      Origin: "https://www.youtube.com",
-      Referer: `https://www.youtube.com/watch?v=${videoId}`,
-    },
-    body: JSON.stringify({
-      videoId,
-      context: {
-        client: {
-          clientName: "WEB",
-          clientVersion: "2.20240110.09.00",
-          hl: "en",
-          gl: "US",
-        },
+  // ── Step 1: Fetch the watch page ──────────────────────────────────────────
+  const watchRes = await fetch(
+    `https://www.youtube.com/watch?v=${videoId}`,
+    {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        Accept:
+          "text/html,application/xhtml+xml,application/xhtml+xml;q=0.9,*/*;q=0.8",
       },
-    }),
-  });
+    }
+  );
 
-  if (!playerRes.ok) {
-    throw new VideoUnavailableError(videoId);
+  if (!watchRes.ok) throw new VideoUnavailableError(videoId);
+
+  const html = await watchRes.text();
+
+  if (html.includes('class="g-recaptcha"')) throw new IpBlockedError();
+
+  // Extract the innertube API key from the page (fall back to known key)
+  const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":\s*"([a-zA-Z0-9_-]+)"/);
+  const apiKey = apiKeyMatch ? apiKeyMatch[1] : FALLBACK_INNERTUBE_KEY;
+
+  // Build consent cookie if YouTube is showing a consent screen (EU)
+  let cookieHeader: Record<string, string> = {};
+  if (html.includes('action="https://consent.youtube.com/s"')) {
+    const match = html.match(/name="v" value="(.*?)"/);
+    if (match) cookieHeader = { Cookie: `CONSENT=YES+${match[1]}` };
   }
+
+  // ── Step 2: POST to innertube player API using the ANDROID client ─────────
+  // ANDROID client is more reliable for server-side requests:
+  //   - skips consent gating
+  //   - less aggressively bot-detected than WEB client
+  const playerRes = await fetch(
+    `https://www.youtube.com/youtubei/v1/player?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent":
+          "com.google.android.youtube/20.10.38 (Linux; U; Android 12) gzip",
+        "Accept-Language": "en-US,en;q=0.9",
+        ...cookieHeader,
+      },
+      body: JSON.stringify({
+        videoId,
+        context: {
+          client: {
+            clientName: "ANDROID",
+            clientVersion: "20.10.38",
+          },
+        },
+      }),
+    }
+  );
+
+  if (!playerRes.ok) throw new VideoUnavailableError(videoId);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const data: any = await playerRes.json();
 
-  const status = data?.playabilityStatus?.status as string | undefined;
+  const status: string | undefined = data?.playabilityStatus?.status;
+  const reason: string = data?.playabilityStatus?.reason ?? "";
+
   if (status && status !== "OK") {
-    if (status === "UNPLAYABLE") throw new TranscriptsDisabledError(videoId);
+    if (reason.toLowerCase().includes("bot")) throw new IpBlockedError();
     throw new VideoUnavailableError(videoId);
   }
 
@@ -76,59 +145,46 @@ async function fetchYouTubeTranscript(
     throw new TranscriptsDisabledError(videoId);
   }
 
-  // Prefer English; otherwise use the first available track
+  // ── Step 3: Select a caption track ───────────────────────────────────────
+  // Skip tracks that have &exp=xpe — these require a PO Token which server-
+  // side requests cannot provide. Try to find another track that works.
+  const usable = captionTracks.filter((t) => !t.baseUrl?.includes("&exp=xpe"));
+
+  if (usable.length === 0) throw new PoTokenRequiredError(videoId);
+
+  // Priority: manual English > auto-generated English > any manual > any track
   const track =
-    captionTracks.find((t) => t.languageCode === "en") ?? captionTracks[0];
+    usable.find((t) => t.languageCode === "en" && t.kind !== "asr") ??
+    usable.find((t) => t.languageCode === "en") ??
+    usable.find((t) => t.kind !== "asr") ??
+    usable[0];
 
-  if (!track?.baseUrl) {
-    throw new TranscriptsDisabledError(videoId);
-  }
+  // Clean the URL — strip &fmt=srv3 (XML-serving3 format; we want plain XML)
+  const transcriptUrl = track.baseUrl.replace("&fmt=srv3", "");
 
-  // Step 2: Fetch the caption XML
-  const captionRes = await fetch(track.baseUrl, {
+  // ── Step 4: Fetch and parse the transcript XML ────────────────────────────
+  const xmlRes = await fetch(transcriptUrl, {
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
     },
   });
 
-  if (!captionRes.ok) {
-    throw new TranscriptsNotAvailableError(videoId);
-  }
+  if (!xmlRes.ok) throw new TranscriptsNotAvailableError(videoId);
 
-  const xml = await captionRes.text();
+  const xml = await xmlRes.text();
   const RE = /<text start="([^"]*)" dur="([^"]*)">([^<]*)<\/text>/g;
-  const items = [...xml.matchAll(RE)].map((m) => ({
-    text: decodeHtmlEntities(m[3]),
-    duration: parseFloat(m[2]),
-    offset: parseFloat(m[1]),
-  }));
+  const items = [...xml.matchAll(RE)]
+    .map((m) => ({
+      text: decodeHtmlEntities(m[3]),
+      duration: parseFloat(m[2]),
+      offset: parseFloat(m[1]),
+    }))
+    .filter((item) => item.text.trim().length > 0);
 
-  if (items.length === 0) {
-    throw new TranscriptsNotAvailableError(videoId);
-  }
+  if (items.length === 0) throw new TranscriptsNotAvailableError(videoId);
 
   return items;
-}
-
-// ---------------------------------------------------------------------------
-// Custom error classes (mirrors what was exported from youtube-transcript)
-// ---------------------------------------------------------------------------
-
-class VideoUnavailableError extends Error {
-  constructor(videoId: string) {
-    super(`The video is no longer available (${videoId})`);
-  }
-}
-class TranscriptsDisabledError extends Error {
-  constructor(videoId: string) {
-    super(`Transcript is disabled on this video (${videoId})`);
-  }
-}
-class TranscriptsNotAvailableError extends Error {
-  constructor(videoId: string) {
-    super(`No transcripts are available for this video (${videoId})`);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +312,13 @@ export async function POST(request: Request) {
           transcriptItems = await fetchYouTubeTranscript(videoId);
         } catch (err) {
           let userMessage: string;
-          if (err instanceof VideoUnavailableError) {
+          if (err instanceof IpBlockedError) {
+            userMessage =
+              "YouTube is blocking this server's requests. This is a known issue with cloud-hosted services. Please try again in a few minutes.";
+          } else if (err instanceof PoTokenRequiredError) {
+            userMessage =
+              "YouTube requires a verification token for this video's transcript. This is a known YouTube restriction that affects server-side requests.";
+          } else if (err instanceof VideoUnavailableError) {
             userMessage =
               "This video is unavailable (it may be private, deleted, or region-locked).";
           } else if (err instanceof TranscriptsDisabledError) {
@@ -269,7 +331,10 @@ export async function POST(request: Request) {
             const msg = err instanceof Error ? err.message : "Unknown error";
             userMessage = `Could not fetch transcript: ${msg}`;
           }
-          sendEvent(controller, encoder, { type: "error", message: userMessage });
+          sendEvent(controller, encoder, {
+            type: "error",
+            message: userMessage,
+          });
           controller.close();
           return;
         }
