@@ -1,13 +1,139 @@
-import {
-  YoutubeTranscript,
-  YoutubeTranscriptDisabledError,
-  YoutubeTranscriptNotAvailableError,
-  YoutubeTranscriptVideoUnavailableError,
-  YoutubeTranscriptTooManyRequestError,
-} from "youtube-transcript";
 import Anthropic from "@anthropic-ai/sdk";
 
 export const maxDuration = 300;
+
+// ---------------------------------------------------------------------------
+// YouTube innertube API – much more reliable than page-scraping
+// ---------------------------------------------------------------------------
+
+interface TranscriptItem {
+  text: string;
+  duration: number;
+  offset: number;
+}
+
+interface CaptionTrack {
+  baseUrl: string;
+  languageCode: string;
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&apos;/g, "'");
+}
+
+async function fetchYouTubeTranscript(
+  videoId: string
+): Promise<TranscriptItem[]> {
+  // Step 1: Ask the innertube player API for video metadata (includes caption tracks)
+  const playerRes = await fetch("https://www.youtube.com/youtubei/v1/player", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      // Modern Chrome UA – YouTube serves different responses to old UAs
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9",
+      Origin: "https://www.youtube.com",
+      Referer: `https://www.youtube.com/watch?v=${videoId}`,
+    },
+    body: JSON.stringify({
+      videoId,
+      context: {
+        client: {
+          clientName: "WEB",
+          clientVersion: "2.20240110.09.00",
+          hl: "en",
+          gl: "US",
+        },
+      },
+    }),
+  });
+
+  if (!playerRes.ok) {
+    throw new VideoUnavailableError(videoId);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data: any = await playerRes.json();
+
+  const status = data?.playabilityStatus?.status as string | undefined;
+  if (status && status !== "OK") {
+    if (status === "UNPLAYABLE") throw new TranscriptsDisabledError(videoId);
+    throw new VideoUnavailableError(videoId);
+  }
+
+  const captionTracks: CaptionTrack[] | undefined =
+    data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+
+  if (!captionTracks || captionTracks.length === 0) {
+    throw new TranscriptsDisabledError(videoId);
+  }
+
+  // Prefer English; otherwise use the first available track
+  const track =
+    captionTracks.find((t) => t.languageCode === "en") ?? captionTracks[0];
+
+  if (!track?.baseUrl) {
+    throw new TranscriptsDisabledError(videoId);
+  }
+
+  // Step 2: Fetch the caption XML
+  const captionRes = await fetch(track.baseUrl, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    },
+  });
+
+  if (!captionRes.ok) {
+    throw new TranscriptsNotAvailableError(videoId);
+  }
+
+  const xml = await captionRes.text();
+  const RE = /<text start="([^"]*)" dur="([^"]*)">([^<]*)<\/text>/g;
+  const items = [...xml.matchAll(RE)].map((m) => ({
+    text: decodeHtmlEntities(m[3]),
+    duration: parseFloat(m[2]),
+    offset: parseFloat(m[1]),
+  }));
+
+  if (items.length === 0) {
+    throw new TranscriptsNotAvailableError(videoId);
+  }
+
+  return items;
+}
+
+// ---------------------------------------------------------------------------
+// Custom error classes (mirrors what was exported from youtube-transcript)
+// ---------------------------------------------------------------------------
+
+class VideoUnavailableError extends Error {
+  constructor(videoId: string) {
+    super(`The video is no longer available (${videoId})`);
+  }
+}
+class TranscriptsDisabledError extends Error {
+  constructor(videoId: string) {
+    super(`Transcript is disabled on this video (${videoId})`);
+  }
+}
+class TranscriptsNotAvailableError extends Error {
+  constructor(videoId: string) {
+    super(`No transcripts are available for this video (${videoId})`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function extractVideoId(url: string): string | null {
   try {
@@ -79,6 +205,10 @@ ${chunk}`,
   return content.text.trim();
 }
 
+// ---------------------------------------------------------------------------
+// Route handler
+// ---------------------------------------------------------------------------
+
 export async function POST(request: Request) {
   let url: string;
   try {
@@ -121,23 +251,20 @@ export async function POST(request: Request) {
           message: "Fetching transcript...",
         });
 
-        let transcriptItems;
+        let transcriptItems: TranscriptItem[];
         try {
-          transcriptItems = await YoutubeTranscript.fetchTranscript(videoId);
+          transcriptItems = await fetchYouTubeTranscript(videoId);
         } catch (err) {
           let userMessage: string;
-          if (err instanceof YoutubeTranscriptDisabledError) {
-            userMessage =
-              "Transcripts are disabled for this video. The creator has turned off captions.";
-          } else if (err instanceof YoutubeTranscriptNotAvailableError) {
-            userMessage =
-              "No transcript is available for this video. It may not have auto-generated captions yet.";
-          } else if (err instanceof YoutubeTranscriptVideoUnavailableError) {
+          if (err instanceof VideoUnavailableError) {
             userMessage =
               "This video is unavailable (it may be private, deleted, or region-locked).";
-          } else if (err instanceof YoutubeTranscriptTooManyRequestError) {
+          } else if (err instanceof TranscriptsDisabledError) {
             userMessage =
-              "Too many requests to YouTube. Please wait a moment and try again.";
+              "Transcripts are disabled for this video. The creator has turned off captions.";
+          } else if (err instanceof TranscriptsNotAvailableError) {
+            userMessage =
+              "No transcript is available for this video. It may not have auto-generated captions yet.";
           } else {
             const msg = err instanceof Error ? err.message : "Unknown error";
             userMessage = `Could not fetch transcript: ${msg}`;
@@ -150,8 +277,7 @@ export async function POST(request: Request) {
         if (!transcriptItems || transcriptItems.length === 0) {
           sendEvent(controller, encoder, {
             type: "error",
-            message:
-              "This video does not have a transcript available.",
+            message: "This video does not have a transcript available.",
           });
           controller.close();
           return;
