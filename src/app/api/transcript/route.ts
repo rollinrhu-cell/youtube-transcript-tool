@@ -22,6 +22,11 @@ interface TranscriptItem {
   offset: number;
 }
 
+interface VideoMeta {
+  title: string;
+  durationSeconds: number;
+}
+
 // ── Supadata ────────────────────────────────────────────────────────────────
 
 async function fetchViaSupadata(
@@ -193,6 +198,45 @@ async function fetchViaAndroid(videoId: string): Promise<TranscriptItem[]> {
 
   if (items.length === 0) throw new TranscriptsNotAvailableError(videoId);
   return items;
+}
+
+// ── Video metadata (title + duration) ────────────────────────────────────────
+// Runs concurrently with fetchTranscript. Returns null on any error so a
+// metadata failure never blocks the transcript.
+
+async function fetchVideoMeta(videoId: string): Promise<VideoMeta | null> {
+  try {
+    const res = await fetch(
+      `https://www.youtube.com/youtubei/v1/player?key=${FALLBACK_INNERTUBE_KEY}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent":
+            "com.google.android.youtube/20.10.38 (Linux; U; Android 12) gzip",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+        body: JSON.stringify({
+          videoId,
+          context: {
+            client: { clientName: "ANDROID", clientVersion: "20.10.38" },
+          },
+        }),
+      }
+    );
+    if (!res.ok) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data: any = await res.json();
+    const title: string = data?.videoDetails?.title ?? "";
+    if (!title) return null;
+    const durationSeconds = parseInt(
+      data?.videoDetails?.lengthSeconds ?? "0",
+      10
+    );
+    return { title, durationSeconds };
+  } catch {
+    return null;
+  }
 }
 
 // ── Orchestrator ─────────────────────────────────────────────────────────────
@@ -409,10 +453,22 @@ export async function POST(request: Request) {
           message: "Fetching transcript...",
         });
 
+        // Run meta fetch concurrently — a failure there never blocks the transcript
+        const [transcriptResult, metaResult] = await Promise.allSettled([
+          fetchTranscript(videoId),
+          fetchVideoMeta(videoId),
+        ]);
+
+        if (metaResult.status === "fulfilled" && metaResult.value) {
+          sendEvent(controller, encoder, {
+            type: "meta",
+            ...metaResult.value,
+          });
+        }
+
         let transcriptItems: TranscriptItem[];
-        try {
-          transcriptItems = await fetchTranscript(videoId);
-        } catch (err) {
+        if (transcriptResult.status === "rejected") {
+          const err = transcriptResult.reason;
           let userMessage: string;
           if (err instanceof IpBlockedError) {
             userMessage =
@@ -437,6 +493,7 @@ export async function POST(request: Request) {
           controller.close();
           return;
         }
+        transcriptItems = transcriptResult.value;
 
         if (!transcriptItems || transcriptItems.length === 0) {
           sendEvent(controller, encoder, {
