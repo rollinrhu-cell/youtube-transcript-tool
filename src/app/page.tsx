@@ -2,6 +2,16 @@
 
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 
+// ── Speaker rename helpers ────────────────────────────────────────────────────
+
+function applyRenames(text: string, names: Record<string, string>): string {
+  if (Object.keys(names).length === 0) return text;
+  return text.replace(/Speaker (\d+):/g, (match, n) => {
+    const custom = names[`Speaker ${n}`];
+    return custom ? `${custom}:` : match;
+  });
+}
+
 type Status =
   | { kind: "idle" }
   | { kind: "loading"; message: string }
@@ -29,6 +39,7 @@ export default function TranscriptPage() {
   const [copied, setCopied] = useState(false);
   const [infoOpen, setInfoOpen] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
+  const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const abortRef = useRef<AbortController | null>(null);
 
   // Restore persisted preferences on mount (runs client-side only)
@@ -72,6 +83,7 @@ export default function TranscriptPage() {
       setTranscript("");
       setHasTimecodes(false);
       setVideoMeta(null);
+      setSpeakerNames({});
       setStatus({ kind: "loading", message: "Fetching transcript…" });
 
       try {
@@ -188,19 +200,27 @@ export default function TranscriptPage() {
     [url]
   );
 
+  // Extract unique speaker labels actually present in the transcript (e.g. ["Speaker 1", "Speaker 2"])
+  const detectedSpeakers = useMemo(() => {
+    if (!transcript) return [];
+    const matches = [...transcript.matchAll(/Speaker (\d+):/g)];
+    const nums = [...new Set(matches.map((m) => parseInt(m[1])))].sort((a, b) => a - b);
+    return nums.map((n) => `Speaker ${n}`);
+  }, [transcript]);
+
   const handleCopy = useCallback(async () => {
     if (!transcript) return;
-    await navigator.clipboard.writeText(transcript);
+    await navigator.clipboard.writeText(applyRenames(transcript, speakerNames));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
-  }, [transcript]);
+  }, [transcript, speakerNames]);
 
   const handleDownloadTxt = useCallback(() => {
     if (!transcript) return;
     const name = videoMeta?.title
       ? videoMeta.title.slice(0, 60).replace(/[^\w\s-]/g, "_")
       : "transcript";
-    const blob = new Blob([transcript], { type: "text/plain;charset=utf-8" });
+    const blob = new Blob([applyRenames(transcript, speakerNames)], { type: "text/plain;charset=utf-8" });
     const href = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = href;
@@ -209,7 +229,7 @@ export default function TranscriptPage() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(href);
-  }, [transcript, videoMeta]);
+  }, [transcript, videoMeta, speakerNames]);
 
   const handleDownloadDocx = useCallback(async () => {
     if (!transcript) return;
@@ -236,7 +256,18 @@ export default function TranscriptPage() {
       );
     }
 
-    for (const line of transcript.split("\n")) {
+    const effectiveText = applyRenames(transcript, speakerNames);
+
+    // Build a regex that matches all speaker label prefixes (original or renamed)
+    const speakerLabelRe = detectedSpeakers.length > 0
+      ? new RegExp(
+          `^((?:${detectedSpeakers
+            .map((s) => (speakerNames[s] || s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+            .join("|")}):)([\\s\\S]*)$`
+        )
+      : /^(Speaker \d+:)([\s\S]*)$/;
+
+    for (const line of effectiveText.split("\n")) {
       if (!line.trim()) {
         paragraphs.push(new Paragraph({}));
         continue;
@@ -247,7 +278,7 @@ export default function TranscriptPage() {
         if (/^\[\d+:\d{2}(?::\d{2})?\]$/.test(part)) {
           runs.push(new TextRun({ text: part + " ", color: "888888", size: 20 }));
         } else {
-          const sm = part.match(/^(Speaker \d+:)([\s\S]*)$/);
+          const sm = part.match(speakerLabelRe);
           if (sm) {
             runs.push(new TextRun({ text: sm[1], bold: true }));
             runs.push(new TextRun({ text: sm[2] }));
@@ -275,7 +306,7 @@ export default function TranscriptPage() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(href);
-  }, [transcript, videoMeta]);
+  }, [transcript, videoMeta, speakerNames, detectedSpeakers]);
 
   const isRunning = status.kind === "loading" || status.kind === "processing";
   const isDone = status.kind === "done";
@@ -541,9 +572,20 @@ export default function TranscriptPage() {
               </div>
             </div>
 
+            {/* Speaker rename panel — only visible when speakers are present and done */}
+            {isDone && detectedSpeakers.length > 0 && (
+              <SpeakerRenamePanel
+                speakers={detectedSpeakers}
+                names={speakerNames}
+                onChange={(speaker, name) =>
+                  setSpeakerNames((prev) => ({ ...prev, [speaker]: name }))
+                }
+              />
+            )}
+
             {/* Transcript body */}
             <div className="px-6 py-5">
-              <TranscriptRenderer text={transcript} />
+              <TranscriptRenderer text={transcript} speakerNames={speakerNames} />
             </div>
 
             {/* Speaker / timecode footer — only after processing is complete */}
@@ -574,8 +616,14 @@ export default function TranscriptPage() {
 
 // ── TranscriptRenderer ────────────────────────────────────────────────────────
 // Renders timecodes as muted gray badges and speaker labels as bold text,
-// while preserving all whitespace and newlines.
-function TranscriptRenderer({ text }: { text: string }) {
+// while preserving all whitespace and newlines. Applies speakerNames substitutions live.
+function TranscriptRenderer({
+  text,
+  speakerNames = {},
+}: {
+  text: string;
+  speakerNames?: Record<string, string>;
+}) {
   const lines = text.split("\n");
   return (
     <div className="font-sans text-sm text-gray-800 dark:text-gray-200 leading-relaxed space-y-1 whitespace-pre-wrap">
@@ -594,14 +642,18 @@ function TranscriptRenderer({ text }: { text: string }) {
                   </span>
                 );
               }
-              const sm = part.match(/^(Speaker \d+:)([\s\S]*)$/);
+              const sm = part.match(/^(Speaker (\d+):)([\s\S]*)$/);
               if (sm) {
+                const speakerKey = `Speaker ${sm[2]}`;
+                const displayLabel = speakerNames[speakerKey]
+                  ? `${speakerNames[speakerKey]}:`
+                  : sm[1];
                 return (
                   <span key={pi}>
                     <span className="font-semibold text-gray-900 dark:text-gray-100">
-                      {sm[1]}
+                      {displayLabel}
                     </span>
-                    {sm[2]}
+                    {sm[3]}
                   </span>
                 );
               }
@@ -611,6 +663,98 @@ function TranscriptRenderer({ text }: { text: string }) {
           </span>
         );
       })}
+    </div>
+  );
+}
+
+// ── SpeakerRenamePanel ────────────────────────────────────────────────────────
+// Shows one editable chip per detected speaker. Clicking a chip opens an inline
+// text field; confirming (Enter / blur) or cancelling (Escape) closes it.
+function SpeakerRenamePanel({
+  speakers,
+  names,
+  onChange,
+}: {
+  speakers: string[];
+  names: Record<string, string>;
+  onChange: (speaker: string, name: string) => void;
+}) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+
+  const startEdit = (speaker: string) => {
+    setEditing(speaker);
+    setDraft(names[speaker] ?? "");
+  };
+
+  const confirm = (speaker: string) => {
+    onChange(speaker, draft.trim());
+    setEditing(null);
+  };
+
+  const cancel = () => setEditing(null);
+
+  if (speakers.length === 0) return null;
+
+  return (
+    <div className="px-6 py-3 border-b border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
+      <p className="text-[11px] font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-2">
+        Rename speakers
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {speakers.map((speaker) => {
+          const displayName = names[speaker] || speaker;
+          const isEditing = editing === speaker;
+
+          if (isEditing) {
+            return (
+              <div key={speaker} className="flex items-center gap-1">
+                <input
+                  autoFocus
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") confirm(speaker);
+                    if (e.key === "Escape") cancel();
+                  }}
+                  onBlur={() => confirm(speaker)}
+                  placeholder={speaker}
+                  className="text-xs border border-blue-400 dark:border-blue-500 rounded-md px-2 py-1 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 w-36"
+                />
+              </div>
+            );
+          }
+
+          const isRenamed = !!names[speaker];
+          return (
+            <button
+              key={speaker}
+              onClick={() => startEdit(speaker)}
+              title={`Click to rename ${speaker}`}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                isRenamed
+                  ? "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900/60"
+                  : "bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-600"
+              }`}
+            >
+              <span>{displayName}</span>
+              <svg
+                className="w-3 h-3 opacity-60 flex-shrink-0"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                />
+              </svg>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
