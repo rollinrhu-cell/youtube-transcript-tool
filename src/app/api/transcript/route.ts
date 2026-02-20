@@ -1,4 +1,10 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, {
+  APIError,
+  RateLimitError,
+  AuthenticationError,
+  APIConnectionError,
+  InternalServerError,
+} from "@anthropic-ai/sdk";
 import { Supadata, SupadataError } from "@supadata/js";
 
 export const maxDuration = 300;
@@ -544,8 +550,27 @@ export async function POST(request: Request) {
         sendEvent(controller, encoder, { type: "done" });
         controller.close();
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "Unknown server error";
-        sendEvent(controller, encoder, { type: "error", message: msg });
+        let userMessage: string;
+        if (err instanceof RateLimitError) {
+          userMessage =
+            "The AI service is temporarily busy due to high demand. Please wait a moment and try again.";
+        } else if (err instanceof AuthenticationError) {
+          userMessage =
+            "Server configuration error: the AI API key is invalid. Please contact the site owner.";
+        } else if (err instanceof InternalServerError) {
+          userMessage =
+            "The AI service encountered an internal error. Please try again in a moment.";
+        } else if (err instanceof APIError && (err as APIError).status === 402) {
+          userMessage =
+            "The AI service is temporarily unavailable (credit limit reached). Please try again later.";
+        } else if (err instanceof APIConnectionError) {
+          // Also catches APIConnectionTimeoutError (a subclass)
+          userMessage =
+            "Lost connection to the AI service. Please check your network and try again.";
+        } else {
+          userMessage = err instanceof Error ? err.message : "Unknown server error";
+        }
+        sendEvent(controller, encoder, { type: "error", message: userMessage });
         controller.close();
       }
     },

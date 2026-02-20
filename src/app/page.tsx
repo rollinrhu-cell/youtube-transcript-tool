@@ -95,6 +95,7 @@ export default function TranscriptPage() {
         const decoder = new TextDecoder();
         let buffer = "";
         const collectedChunks: string[] = [];
+        let receivedCompletion = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -155,6 +156,7 @@ export default function TranscriptPage() {
 
               case "done":
                 setStatus({ kind: "done" });
+                receivedCompletion = true;
                 break;
 
               case "error":
@@ -162,9 +164,18 @@ export default function TranscriptPage() {
                   kind: "error",
                   message: event.message as string,
                 });
+                receivedCompletion = true;
                 break;
             }
           }
+        }
+        // Stream ended without a done or error event — Vercel timeout or network cut
+        if (!receivedCompletion) {
+          setStatus({
+            kind: "error",
+            message:
+              "The request was cut off before finishing — the video may be too long for the server's time limit. Try a shorter video, or try again.",
+          });
         }
       } catch (err) {
         if ((err as Error).name === "AbortError") return;
