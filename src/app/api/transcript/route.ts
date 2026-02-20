@@ -1,4 +1,10 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, {
+  APIError,
+  RateLimitError,
+  AuthenticationError,
+  APIConnectionError,
+  InternalServerError,
+} from "@anthropic-ai/sdk";
 import { Supadata, SupadataError } from "@supadata/js";
 
 export const maxDuration = 300;
@@ -333,7 +339,19 @@ function sendEvent(
   controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
 }
 
-// Returns raw text with [M:00] timecode markers embedded at each minute boundary.
+// Format a minute-boundary offset as a human-readable timecode marker.
+// Under 1 hour:  [M:00]      e.g. [0:00], [1:00], [59:00]
+// 1 hour+:       [H:MM:00]   e.g. [1:00:00], [1:30:00], [2:00:00]
+function formatTimecodeMarker(totalMinutes: number): string {
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  if (h > 0) {
+    return `[${h}:${String(m).padStart(2, "0")}:00]`;
+  }
+  return `[${m}:00]`;
+}
+
+// Returns raw text with timecode markers embedded at each minute boundary.
 // If items lack real timing data (e.g. Supadata returned a plain-text string with
 // all offsets at 0), skips markers and returns hasTimecodes: false.
 function buildRawText(items: TranscriptItem[]): {
@@ -355,7 +373,7 @@ function buildRawText(items: TranscriptItem[]): {
   for (const item of items) {
     const minute = Math.floor(item.offset / 60);
     if (minute > lastMinuteMark) {
-      parts.push(`[${minute}:00]`);
+      parts.push(formatTimecodeMarker(minute));
       lastMinuteMark = minute;
     }
     const text = item.text.replace(/\n/g, " ").trim();
@@ -380,7 +398,7 @@ async function cleanChunk(
         : "This is the final section of a transcript. ";
 
   const timecodeInstruction = hasTimecodes
-    ? `5. Preserve every timecode marker exactly as-is — e.g. [0:00], [1:00], [12:00]. Do not remove, move, or reformat them; keep each one at the point in the sentence where it naturally falls.
+    ? `5. Preserve every timecode marker exactly as-is — e.g. [0:00], [1:00], [12:00], [1:00:00], [1:30:00]. Do not remove, move, or reformat them; keep each one at the point in the sentence where it naturally falls.
 6.`
     : "5.";
 
@@ -544,8 +562,27 @@ export async function POST(request: Request) {
         sendEvent(controller, encoder, { type: "done" });
         controller.close();
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "Unknown server error";
-        sendEvent(controller, encoder, { type: "error", message: msg });
+        let userMessage: string;
+        if (err instanceof RateLimitError) {
+          userMessage =
+            "The AI service is temporarily busy due to high demand. Please wait a moment and try again.";
+        } else if (err instanceof AuthenticationError) {
+          userMessage =
+            "Server configuration error: the AI API key is invalid. Please contact the site owner.";
+        } else if (err instanceof InternalServerError) {
+          userMessage =
+            "The AI service encountered an internal error. Please try again in a moment.";
+        } else if (err instanceof APIError && (err as APIError).status === 402) {
+          userMessage =
+            "The AI service is temporarily unavailable (credit limit reached). Please try again later.";
+        } else if (err instanceof APIConnectionError) {
+          // Also catches APIConnectionTimeoutError (a subclass)
+          userMessage =
+            "Lost connection to the AI service. Please check your network and try again.";
+        } else {
+          userMessage = err instanceof Error ? err.message : "Unknown server error";
+        }
+        sendEvent(controller, encoder, { type: "error", message: userMessage });
         controller.close();
       }
     },

@@ -95,6 +95,7 @@ export default function TranscriptPage() {
         const decoder = new TextDecoder();
         let buffer = "";
         const collectedChunks: string[] = [];
+        let receivedCompletion = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -155,6 +156,7 @@ export default function TranscriptPage() {
 
               case "done":
                 setStatus({ kind: "done" });
+                receivedCompletion = true;
                 break;
 
               case "error":
@@ -162,9 +164,18 @@ export default function TranscriptPage() {
                   kind: "error",
                   message: event.message as string,
                 });
+                receivedCompletion = true;
                 break;
             }
           }
+        }
+        // Stream ended without a done or error event — Vercel timeout or network cut
+        if (!receivedCompletion) {
+          setStatus({
+            kind: "error",
+            message:
+              "The request was cut off before finishing — the video may be too long for the server's time limit. Try a shorter video, or try again.",
+          });
         }
       } catch (err) {
         if ((err as Error).name === "AbortError") return;
@@ -230,10 +241,10 @@ export default function TranscriptPage() {
         paragraphs.push(new Paragraph({}));
         continue;
       }
-      const parts = line.split(/(\[\d+:\d{2}\])/g);
+      const parts = line.split(/(\[\d+:\d{2}(?::\d{2})?\])/g);
       const runs = [];
       for (const part of parts) {
-        if (/^\[\d+:\d{2}\]$/.test(part)) {
+        if (/^\[\d+:\d{2}(?::\d{2})?\]$/.test(part)) {
           runs.push(new TextRun({ text: part + " ", color: "888888", size: 20 }));
         } else {
           const sm = part.match(/^(Speaker \d+:)([\s\S]*)$/);
@@ -273,7 +284,7 @@ export default function TranscriptPage() {
   const wordCount = useMemo(() => {
     if (!transcript) return 0;
     return transcript
-      .replace(/\[\d+:\d{2}\]/g, "")
+      .replace(/\[\d+:\d{2}(?::\d{2})?\]/g, "")
       .split(/\s+/)
       .filter(Boolean).length;
   }, [transcript]);
@@ -569,11 +580,11 @@ function TranscriptRenderer({ text }: { text: string }) {
   return (
     <div className="font-sans text-sm text-gray-800 dark:text-gray-200 leading-relaxed space-y-1 whitespace-pre-wrap">
       {lines.map((line, li) => {
-        const parts = line.split(/(\[\d+:\d{2}\])/g);
+        const parts = line.split(/(\[\d+:\d{2}(?::\d{2})?\])/g);
         return (
           <span key={li}>
             {parts.map((part, pi) => {
-              if (/^\[\d+:\d{2}\]$/.test(part)) {
+              if (/^\[\d+:\d{2}(?::\d{2})?\]$/.test(part)) {
                 return (
                   <span
                     key={pi}
