@@ -339,7 +339,19 @@ function sendEvent(
   controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
 }
 
-// Returns raw text with [M:00] timecode markers embedded at each minute boundary.
+// Format a minute-boundary offset as a human-readable timecode marker.
+// Under 1 hour:  [M:00]      e.g. [0:00], [1:00], [59:00]
+// 1 hour+:       [H:MM:00]   e.g. [1:00:00], [1:30:00], [2:00:00]
+function formatTimecodeMarker(totalMinutes: number): string {
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  if (h > 0) {
+    return `[${h}:${String(m).padStart(2, "0")}:00]`;
+  }
+  return `[${m}:00]`;
+}
+
+// Returns raw text with timecode markers embedded at each minute boundary.
 // If items lack real timing data (e.g. Supadata returned a plain-text string with
 // all offsets at 0), skips markers and returns hasTimecodes: false.
 function buildRawText(items: TranscriptItem[]): {
@@ -361,7 +373,7 @@ function buildRawText(items: TranscriptItem[]): {
   for (const item of items) {
     const minute = Math.floor(item.offset / 60);
     if (minute > lastMinuteMark) {
-      parts.push(`[${minute}:00]`);
+      parts.push(formatTimecodeMarker(minute));
       lastMinuteMark = minute;
     }
     const text = item.text.replace(/\n/g, " ").trim();
@@ -386,7 +398,7 @@ async function cleanChunk(
         : "This is the final section of a transcript. ";
 
   const timecodeInstruction = hasTimecodes
-    ? `5. Preserve every timecode marker exactly as-is — e.g. [0:00], [1:00], [12:00]. Do not remove, move, or reformat them; keep each one at the point in the sentence where it naturally falls.
+    ? `5. Preserve every timecode marker exactly as-is — e.g. [0:00], [1:00], [12:00], [1:00:00], [1:30:00]. Do not remove, move, or reformat them; keep each one at the point in the sentence where it naturally falls.
 6.`
     : "5.";
 
