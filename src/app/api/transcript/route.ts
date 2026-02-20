@@ -1,25 +1,85 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { Supadata, SupadataError } from "@supadata/js";
 
 export const maxDuration = 300;
 
 // ---------------------------------------------------------------------------
-// YouTube transcript extraction
-// Mirrors the approach used by youtube-transcript-api v1.2.4:
-//   1. Fetch the watch page to extract the innertube API key + detect consent
-//   2. POST to /youtubei/v1/player?key=... using the ANDROID client
-//      (ANDROID bypasses consent gating; WEB client is blocked more aggressively)
-//   3. Skip any caption tracks that require a PO Token (&exp=xpe)
-//   4. Fetch and parse the timedtext XML
+// Transcript extraction strategy
+//
+// Primary:  Supadata API  (set SUPADATA_API_KEY in env)
+//           - Runs behind a managed proxy pool; not affected by cloud IP blocks
+//           - Free tier, no card required: https://supadata.ai
+//           - mode:'native' = only existing YouTube captions, no AI generation
+//
+// Fallback: Direct YouTube ANDROID innertube client
+//           - Used when SUPADATA_API_KEY is absent or Supadata has a temp error
+//           - Still blocked by YouTube on some Vercel IPs, but worth trying
 // ---------------------------------------------------------------------------
-
-// Well-known fallback key — extracted dynamically from the page at runtime
-const FALLBACK_INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
 
 interface TranscriptItem {
   text: string;
   duration: number;
   offset: number;
 }
+
+// ── Supadata ────────────────────────────────────────────────────────────────
+
+async function fetchViaSupadata(
+  videoId: string,
+  apiKey: string
+): Promise<TranscriptItem[]> {
+  const supadata = new Supadata({ apiKey });
+
+  let result = await supadata.transcript({
+    url: `https://www.youtube.com/watch?v=${videoId}`,
+    lang: "en",
+    mode: "native", // only existing captions; never AI-generate
+  });
+
+  // Large videos are processed async and return a jobId instead of content.
+  // Poll until complete (max ~90 s).
+  if ("jobId" in result) {
+    const { jobId } = result as { jobId: string };
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const status = await supadata.transcript.getJobStatus(jobId);
+      if (status.status === "completed" && status.result) {
+        result = status.result;
+        break;
+      }
+      if (status.status === "failed") {
+        throw new TranscriptsNotAvailableError(videoId);
+      }
+    }
+    // Still a jobId after polling — give up
+    if ("jobId" in result) throw new TranscriptsNotAvailableError(videoId);
+  }
+
+  const { content } = result as { content: unknown };
+
+  if (typeof content === "string") {
+    const text = content.trim();
+    if (!text) throw new TranscriptsNotAvailableError(videoId);
+    return [{ text, offset: 0, duration: 0 }];
+  }
+
+  if (Array.isArray(content)) {
+    const items = (
+      content as Array<{ text: string; offset: number; duration: number }>
+    )
+      .map((c) => ({ text: c.text, offset: c.offset, duration: c.duration }))
+      .filter((c) => c.text.trim().length > 0);
+    if (items.length === 0) throw new TranscriptsNotAvailableError(videoId);
+    return items;
+  }
+
+  throw new TranscriptsNotAvailableError(videoId);
+}
+
+// ── Direct YouTube ANDROID client (fallback) ────────────────────────────────
+
+// Well-known fallback key — extracted dynamically from the page at runtime
+const FALLBACK_INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
 
 interface CaptionTrack {
   baseUrl: string;
@@ -37,6 +97,136 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&#x27;/g, "'")
     .replace(/&apos;/g, "'");
 }
+
+async function fetchViaAndroid(videoId: string): Promise<TranscriptItem[]> {
+  // Step 1: watch page → extract INNERTUBE_API_KEY + consent cookie
+  const watchRes = await fetch(
+    `https://www.youtube.com/watch?v=${videoId}`,
+    {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        Accept:
+          "text/html,application/xhtml+xml,application/xhtml+xml;q=0.9,*/*;q=0.8",
+      },
+    }
+  );
+  if (!watchRes.ok) throw new VideoUnavailableError(videoId);
+
+  const html = await watchRes.text();
+  if (html.includes('class="g-recaptcha"')) throw new IpBlockedError();
+
+  const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":\s*"([a-zA-Z0-9_-]+)"/);
+  const ytApiKey = apiKeyMatch ? apiKeyMatch[1] : FALLBACK_INNERTUBE_KEY;
+
+  let cookieHeader: Record<string, string> = {};
+  if (html.includes('action="https://consent.youtube.com/s"')) {
+    const m = html.match(/name="v" value="(.*?)"/);
+    if (m) cookieHeader = { Cookie: `CONSENT=YES+${m[1]}` };
+  }
+
+  // Step 2: innertube player API — ANDROID client is less bot-scrutinised
+  const playerRes = await fetch(
+    `https://www.youtube.com/youtubei/v1/player?key=${ytApiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent":
+          "com.google.android.youtube/20.10.38 (Linux; U; Android 12) gzip",
+        "Accept-Language": "en-US,en;q=0.9",
+        ...cookieHeader,
+      },
+      body: JSON.stringify({
+        videoId,
+        context: { client: { clientName: "ANDROID", clientVersion: "20.10.38" } },
+      }),
+    }
+  );
+  if (!playerRes.ok) throw new VideoUnavailableError(videoId);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data: any = await playerRes.json();
+  const status: string | undefined = data?.playabilityStatus?.status;
+  const reason: string = data?.playabilityStatus?.reason ?? "";
+
+  if (status && status !== "OK") {
+    if (reason.toLowerCase().includes("bot")) throw new IpBlockedError();
+    throw new VideoUnavailableError(videoId);
+  }
+
+  const captionTracks: CaptionTrack[] | undefined =
+    data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+  if (!captionTracks || captionTracks.length === 0)
+    throw new TranscriptsDisabledError(videoId);
+
+  // Skip tracks requiring PO Token (&exp=xpe) — server-side can't satisfy them
+  const usable = captionTracks.filter((t) => !t.baseUrl?.includes("&exp=xpe"));
+  if (usable.length === 0) throw new PoTokenRequiredError(videoId);
+
+  const track =
+    usable.find((t) => t.languageCode === "en" && t.kind !== "asr") ??
+    usable.find((t) => t.languageCode === "en") ??
+    usable.find((t) => t.kind !== "asr") ??
+    usable[0];
+
+  // Step 3: fetch and parse transcript XML
+  const transcriptUrl = track.baseUrl.replace("&fmt=srv3", "");
+  const xmlRes = await fetch(transcriptUrl, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    },
+  });
+  if (!xmlRes.ok) throw new TranscriptsNotAvailableError(videoId);
+
+  const xml = await xmlRes.text();
+  const RE = /<text start="([^"]*)" dur="([^"]*)">([^<]*)<\/text>/g;
+  const items = [...xml.matchAll(RE)]
+    .map((m) => ({
+      text: decodeHtmlEntities(m[3]),
+      duration: parseFloat(m[2]),
+      offset: parseFloat(m[1]),
+    }))
+    .filter((item) => item.text.trim().length > 0);
+
+  if (items.length === 0) throw new TranscriptsNotAvailableError(videoId);
+  return items;
+}
+
+// ── Orchestrator ─────────────────────────────────────────────────────────────
+
+async function fetchTranscript(videoId: string): Promise<TranscriptItem[]> {
+  const supadataKey = process.env.SUPADATA_API_KEY;
+
+  if (supadataKey) {
+    try {
+      return await fetchViaSupadata(videoId, supadataKey);
+    } catch (err) {
+      if (err instanceof SupadataError) {
+        // Definitive errors — no point falling through to direct approach
+        if (err.error === "transcript-unavailable")
+          throw new TranscriptsDisabledError(videoId);
+        if (err.error === "not-found")
+          throw new VideoUnavailableError(videoId);
+        // upgrade-required / limit-exceeded / auth errors → fall through
+      } else if (
+        // Re-throw our own error types from polling — they're already final
+        err instanceof TranscriptsDisabledError ||
+        err instanceof VideoUnavailableError
+      ) {
+        throw err;
+      }
+      // For auth, quota, or transient errors, fall through to direct approach
+      console.error("[transcript] Supadata failed, trying direct:", err);
+    }
+  }
+
+  return await fetchViaAndroid(videoId);
+}
+
+// ── Error types ───────────────────────────────────────────────────────────────
 
 class VideoUnavailableError extends Error {
   constructor(videoId: string) {
@@ -64,132 +254,7 @@ class PoTokenRequiredError extends Error {
   }
 }
 
-async function fetchYouTubeTranscript(
-  videoId: string
-): Promise<TranscriptItem[]> {
-  // ── Step 1: Fetch the watch page ──────────────────────────────────────────
-  const watchRes = await fetch(
-    `https://www.youtube.com/watch?v=${videoId}`,
-    {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        Accept:
-          "text/html,application/xhtml+xml,application/xhtml+xml;q=0.9,*/*;q=0.8",
-      },
-    }
-  );
-
-  if (!watchRes.ok) throw new VideoUnavailableError(videoId);
-
-  const html = await watchRes.text();
-
-  if (html.includes('class="g-recaptcha"')) throw new IpBlockedError();
-
-  // Extract the innertube API key from the page (fall back to known key)
-  const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":\s*"([a-zA-Z0-9_-]+)"/);
-  const apiKey = apiKeyMatch ? apiKeyMatch[1] : FALLBACK_INNERTUBE_KEY;
-
-  // Build consent cookie if YouTube is showing a consent screen (EU)
-  let cookieHeader: Record<string, string> = {};
-  if (html.includes('action="https://consent.youtube.com/s"')) {
-    const match = html.match(/name="v" value="(.*?)"/);
-    if (match) cookieHeader = { Cookie: `CONSENT=YES+${match[1]}` };
-  }
-
-  // ── Step 2: POST to innertube player API using the ANDROID client ─────────
-  // ANDROID client is more reliable for server-side requests:
-  //   - skips consent gating
-  //   - less aggressively bot-detected than WEB client
-  const playerRes = await fetch(
-    `https://www.youtube.com/youtubei/v1/player?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent":
-          "com.google.android.youtube/20.10.38 (Linux; U; Android 12) gzip",
-        "Accept-Language": "en-US,en;q=0.9",
-        ...cookieHeader,
-      },
-      body: JSON.stringify({
-        videoId,
-        context: {
-          client: {
-            clientName: "ANDROID",
-            clientVersion: "20.10.38",
-          },
-        },
-      }),
-    }
-  );
-
-  if (!playerRes.ok) throw new VideoUnavailableError(videoId);
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const data: any = await playerRes.json();
-
-  const status: string | undefined = data?.playabilityStatus?.status;
-  const reason: string = data?.playabilityStatus?.reason ?? "";
-
-  if (status && status !== "OK") {
-    if (reason.toLowerCase().includes("bot")) throw new IpBlockedError();
-    throw new VideoUnavailableError(videoId);
-  }
-
-  const captionTracks: CaptionTrack[] | undefined =
-    data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-
-  if (!captionTracks || captionTracks.length === 0) {
-    throw new TranscriptsDisabledError(videoId);
-  }
-
-  // ── Step 3: Select a caption track ───────────────────────────────────────
-  // Skip tracks that have &exp=xpe — these require a PO Token which server-
-  // side requests cannot provide. Try to find another track that works.
-  const usable = captionTracks.filter((t) => !t.baseUrl?.includes("&exp=xpe"));
-
-  if (usable.length === 0) throw new PoTokenRequiredError(videoId);
-
-  // Priority: manual English > auto-generated English > any manual > any track
-  const track =
-    usable.find((t) => t.languageCode === "en" && t.kind !== "asr") ??
-    usable.find((t) => t.languageCode === "en") ??
-    usable.find((t) => t.kind !== "asr") ??
-    usable[0];
-
-  // Clean the URL — strip &fmt=srv3 (XML-serving3 format; we want plain XML)
-  const transcriptUrl = track.baseUrl.replace("&fmt=srv3", "");
-
-  // ── Step 4: Fetch and parse the transcript XML ────────────────────────────
-  const xmlRes = await fetch(transcriptUrl, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    },
-  });
-
-  if (!xmlRes.ok) throw new TranscriptsNotAvailableError(videoId);
-
-  const xml = await xmlRes.text();
-  const RE = /<text start="([^"]*)" dur="([^"]*)">([^<]*)<\/text>/g;
-  const items = [...xml.matchAll(RE)]
-    .map((m) => ({
-      text: decodeHtmlEntities(m[3]),
-      duration: parseFloat(m[2]),
-      offset: parseFloat(m[1]),
-    }))
-    .filter((item) => item.text.trim().length > 0);
-
-  if (items.length === 0) throw new TranscriptsNotAvailableError(videoId);
-
-  return items;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function extractVideoId(url: string): string | null {
   try {
@@ -198,8 +263,8 @@ function extractVideoId(url: string): string | null {
     if (u.hostname.includes("youtube.com")) {
       const v = u.searchParams.get("v");
       if (v) return v;
-      const match = u.pathname.match(/\/embed\/([^/?]+)/);
-      if (match) return match[1];
+      const m = u.pathname.match(/\/embed\/([^/?]+)/);
+      if (m) return m[1];
     }
     return null;
   } catch {
@@ -234,8 +299,8 @@ async function cleanChunk(
     !isFirst && !isLast
       ? "This is a middle section of a longer transcript. "
       : isFirst
-      ? "This is the beginning of a transcript. "
-      : "This is the final section of a transcript. ";
+        ? "This is the beginning of a transcript. "
+        : "This is the final section of a transcript. ";
 
   const message = await client.messages.create({
     model: "claude-haiku-4-5",
@@ -261,9 +326,7 @@ ${chunk}`,
   return content.text.trim();
 }
 
-// ---------------------------------------------------------------------------
-// Route handler
-// ---------------------------------------------------------------------------
+// ── Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(request: Request) {
   let url: string;
@@ -289,8 +352,8 @@ export async function POST(request: Request) {
     );
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!anthropicKey) {
     return Response.json(
       { error: "Server configuration error: missing API key" },
       { status: 500 }
@@ -309,15 +372,15 @@ export async function POST(request: Request) {
 
         let transcriptItems: TranscriptItem[];
         try {
-          transcriptItems = await fetchYouTubeTranscript(videoId);
+          transcriptItems = await fetchTranscript(videoId);
         } catch (err) {
           let userMessage: string;
           if (err instanceof IpBlockedError) {
             userMessage =
-              "YouTube is blocking this server's requests. This is a known issue with cloud-hosted services. Please try again in a few minutes.";
+              "YouTube is blocking this server's requests. This is a known issue with cloud-hosted services — set SUPADATA_API_KEY to route around it.";
           } else if (err instanceof PoTokenRequiredError) {
             userMessage =
-              "YouTube requires a verification token for this video's transcript. This is a known YouTube restriction that affects server-side requests.";
+              "YouTube requires a verification token for this video's transcript. Set SUPADATA_API_KEY to work around this.";
           } else if (err instanceof VideoUnavailableError) {
             userMessage =
               "This video is unavailable (it may be private, deleted, or region-locked).";
@@ -331,10 +394,7 @@ export async function POST(request: Request) {
             const msg = err instanceof Error ? err.message : "Unknown error";
             userMessage = `Could not fetch transcript: ${msg}`;
           }
-          sendEvent(controller, encoder, {
-            type: "error",
-            message: userMessage,
-          });
+          sendEvent(controller, encoder, { type: "error", message: userMessage });
           controller.close();
           return;
         }
@@ -362,7 +422,7 @@ export async function POST(request: Request) {
           wordCount: rawText.split(/\s+/).length,
         });
 
-        const client = new Anthropic({ apiKey });
+        const client = new Anthropic({ apiKey: anthropicKey });
 
         for (let i = 0; i < chunks.length; i++) {
           sendEvent(controller, encoder, {
