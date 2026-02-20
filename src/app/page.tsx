@@ -13,6 +13,7 @@ export default function TranscriptPage() {
   const [url, setUrl] = useState("");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [transcript, setTranscript] = useState("");
+  const [hasTimecodes, setHasTimecodes] = useState(false);
   const [copied, setCopied] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -27,6 +28,7 @@ export default function TranscriptPage() {
       abortRef.current = controller;
 
       setTranscript("");
+      setHasTimecodes(false);
       setStatus({ kind: "loading", message: "Fetching transcript..." });
 
       try {
@@ -80,6 +82,7 @@ export default function TranscriptPage() {
                 break;
 
               case "info":
+                setHasTimecodes(!!(event.hasTimecodes as boolean));
                 setStatus({
                   kind: "processing",
                   current: 0,
@@ -270,66 +273,133 @@ export default function TranscriptPage() {
         )}
 
         {/* Transcript output */}
-        {transcript && (
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-              <h2 className="text-sm font-semibold text-gray-700">
-                Cleaned Transcript
-                {status.kind === "processing" && (
-                  <span className="ml-2 text-xs font-normal text-gray-400">
-                    (updating live…)
-                  </span>
-                )}
-              </h2>
-              <button
-                onClick={handleCopy}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-gray-600 hover:bg-gray-100 transition-colors border border-gray-200"
-              >
-                {copied ? (
-                  <>
-                    <svg
-                      className="w-3.5 h-3.5 text-green-600"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M5 13l4 4L19 7"
-                      />
-                    </svg>
-                    Copied!
-                  </>
-                ) : (
-                  <>
-                    <svg
-                      className="w-3.5 h-3.5"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                      />
-                    </svg>
-                    Copy
-                  </>
-                )}
-              </button>
-            </div>
-            <div className="px-6 py-5">
-              <div className="prose prose-sm max-w-none text-gray-800 leading-relaxed space-y-4 whitespace-pre-wrap font-sans text-sm">
-                {transcript}
+        {transcript && (() => {
+          const isDone = status.kind === "done";
+          const hasSpeakers = isDone && /^Speaker \d+:/m.test(transcript);
+          return (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+                <h2 className="text-sm font-semibold text-gray-700">
+                  Cleaned Transcript
+                  {status.kind === "processing" && (
+                    <span className="ml-2 text-xs font-normal text-gray-400">
+                      (updating live…)
+                    </span>
+                  )}
+                </h2>
+                <button
+                  onClick={handleCopy}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-gray-600 hover:bg-gray-100 transition-colors border border-gray-200"
+                >
+                  {copied ? (
+                    <>
+                      <svg
+                        className="w-3.5 h-3.5 text-green-600"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M5 13l4 4L19 7"
+                        />
+                      </svg>
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <svg
+                        className="w-3.5 h-3.5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                        />
+                      </svg>
+                      Copy
+                    </>
+                  )}
+                </button>
               </div>
+              <div className="px-6 py-5">
+                <TranscriptRenderer text={transcript} />
+              </div>
+              {/* Speaker / timecode footer — only after processing is complete */}
+              {isDone && (
+                <div className="px-6 pb-5 space-y-2">
+                  {hasSpeakers ? (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 leading-relaxed">
+                      <span className="font-medium">Note:</span> Speaker labels are AI-inferred and may not be accurate — YouTube transcripts contain no speaker data. Verify against the original video before publishing.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-gray-400 leading-relaxed">
+                      Speaker identification was not possible for this video.
+                    </p>
+                  )}
+                  {hasTimecodes && (
+                    <p className="text-xs text-gray-400 leading-relaxed">
+                      Timecodes are approximate and reflect the original video timestamps.
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          );
+        })()}
       </main>
+    </div>
+  );
+}
+
+// Renders the cleaned transcript with timecodes styled as muted gray badges
+// and speaker labels styled as bold text, while preserving all whitespace/newlines.
+function TranscriptRenderer({ text }: { text: string }) {
+  // Split into lines first so \n is respected, then handle timecodes and speaker
+  // labels within each line.
+  const lines = text.split("\n");
+  return (
+    <div className="font-sans text-sm text-gray-800 leading-relaxed space-y-1 whitespace-pre-wrap">
+      {lines.map((line, li) => {
+        // Each line may contain zero or more [M:00] markers and/or start with "Speaker N:"
+        const parts = line.split(/(\[\d+:\d{2}\])/g);
+        return (
+          <span key={li}>
+            {parts.map((part, pi) => {
+              if (/^\[\d+:\d{2}\]$/.test(part)) {
+                return (
+                  <span
+                    key={pi}
+                    className="inline-block text-[11px] text-gray-400 font-mono bg-gray-100 rounded px-1 py-px mx-0.5 align-middle leading-none select-none"
+                  >
+                    {part}
+                  </span>
+                );
+              }
+              // Bold the "Speaker N:" label at the start of a segment
+              const speakerMatch = part.match(/^(Speaker \d+:)([\s\S]*)$/);
+              if (speakerMatch) {
+                return (
+                  <span key={pi}>
+                    <span className="font-semibold text-gray-900">
+                      {speakerMatch[1]}
+                    </span>
+                    {speakerMatch[2]}
+                  </span>
+                );
+              }
+              return <span key={pi}>{part}</span>;
+            })}
+            {li < lines.length - 1 && "\n"}
+          </span>
+        );
+      })}
     </div>
   );
 }

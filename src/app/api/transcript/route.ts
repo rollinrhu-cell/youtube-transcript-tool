@@ -289,11 +289,44 @@ function sendEvent(
   controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
 }
 
+// Returns raw text with [M:00] timecode markers embedded at each minute boundary.
+// If items lack real timing data (e.g. Supadata returned a plain-text string with
+// all offsets at 0), skips markers and returns hasTimecodes: false.
+function buildRawText(items: TranscriptItem[]): {
+  text: string;
+  hasTimecodes: boolean;
+} {
+  const hasTimingData = items.length > 1 && items.some((i) => i.offset > 0);
+
+  if (!hasTimingData) {
+    return {
+      text: items.map((i) => i.text.replace(/\n/g, " ")).join(" "),
+      hasTimecodes: false,
+    };
+  }
+
+  let lastMinuteMark = -1;
+  const parts: string[] = [];
+
+  for (const item of items) {
+    const minute = Math.floor(item.offset / 60);
+    if (minute > lastMinuteMark) {
+      parts.push(`[${minute}:00]`);
+      lastMinuteMark = minute;
+    }
+    const text = item.text.replace(/\n/g, " ").trim();
+    if (text) parts.push(text);
+  }
+
+  return { text: parts.join(" "), hasTimecodes: true };
+}
+
 async function cleanChunk(
   client: Anthropic,
   chunk: string,
   isFirst: boolean,
-  isLast: boolean
+  isLast: boolean,
+  hasTimecodes: boolean
 ): Promise<string> {
   const contextNote =
     !isFirst && !isLast
@@ -301,6 +334,11 @@ async function cleanChunk(
       : isFirst
         ? "This is the beginning of a transcript. "
         : "This is the final section of a transcript. ";
+
+  const timecodeInstruction = hasTimecodes
+    ? `5. Preserve every timecode marker exactly as-is — e.g. [0:00], [1:00], [12:00]. Do not remove, move, or reformat them; keep each one at the point in the sentence where it naturally falls.
+6.`
+    : "5.";
 
   const message = await client.messages.create({
     model: "claude-haiku-4-5",
@@ -313,7 +351,8 @@ async function cleanChunk(
 2. Remove filler words: um, uh, like (when used as filler), you know, basically, literally, right (when used as filler), so (when used as sentence starter filler), okay (when used as filler)
 3. Break the text into logical paragraphs based on topic shifts or natural pauses
 4. Preserve all the original meaning and content — do not summarize, skip information, or add anything new
-5. Return ONLY the cleaned transcript text, with no explanations, labels, or commentary
+${timecodeInstruction} Attempt to identify distinct speakers. When you detect a speaker change, start that speaker's paragraph with "Speaker 1:", "Speaker 2:", etc. Only do this if you can confidently detect two or more distinct voices from the conversational back-and-forth, topic changes, or named references. If the transcript has a single speaker or speakers cannot be distinguished, omit all speaker labels.
+${hasTimecodes ? "7." : "6."} Return ONLY the cleaned transcript text, with no explanations, preamble, or commentary
 
 Transcript to clean:
 ${chunk}`,
@@ -408,9 +447,7 @@ export async function POST(request: Request) {
           return;
         }
 
-        const rawText = transcriptItems
-          .map((item) => item.text.replace(/\n/g, " "))
-          .join(" ");
+        const { text: rawText, hasTimecodes } = buildRawText(transcriptItems);
 
         const WORDS_PER_CHUNK = 3000;
         const chunks = chunkWords(rawText, WORDS_PER_CHUNK);
@@ -420,6 +457,7 @@ export async function POST(request: Request) {
           type: "info",
           totalChunks,
           wordCount: rawText.split(/\s+/).length,
+          hasTimecodes,
         });
 
         const client = new Anthropic({ apiKey: anthropicKey });
@@ -435,7 +473,8 @@ export async function POST(request: Request) {
             client,
             chunks[i],
             i === 0,
-            i === chunks.length - 1
+            i === chunks.length - 1,
+            hasTimecodes
           );
 
           sendEvent(controller, encoder, {
