@@ -162,6 +162,30 @@ export default function TranscriptPage() {
       </header>
 
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+        {/* Info notes */}
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+          <div className="flex items-center gap-2 px-5 py-3 border-b border-gray-100 bg-gray-50">
+            <svg className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Good to know</span>
+          </div>
+          <ul className="divide-y divide-gray-100">
+            <li className="px-5 py-3.5 flex gap-3">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide w-24 flex-shrink-0 pt-px">Accuracy</span>
+              <p className="text-sm text-gray-600 leading-relaxed">Transcripts are cleaned up by AI and should not be treated as verbatim quotes. If quoting for publication, refer back to the original video.</p>
+            </li>
+            <li className="px-5 py-3.5 flex gap-3">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide w-24 flex-shrink-0 pt-px">Check first</span>
+              <p className="text-sm text-gray-600 leading-relaxed">To confirm a video has a transcript before submitting, open it on YouTube, click the three dots <span className="font-medium text-gray-700">⋯</span> below the player, and select <span className="font-medium text-gray-700">Open transcript</span>. If that option doesn&apos;t appear, the transcript won&apos;t be available here.</p>
+            </li>
+            <li className="px-5 py-3.5 flex gap-3">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide w-24 flex-shrink-0 pt-px">Usage</span>
+              <p className="text-sm text-gray-600 leading-relaxed">This tool has a monthly limit of about 100 transcripts, so please be mindful of usage.</p>
+            </li>
+          </ul>
+        </div>
+
         {/* URL form */}
         <form onSubmit={handleSubmit} className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
           <label
