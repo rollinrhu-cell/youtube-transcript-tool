@@ -511,7 +511,7 @@ export default function TranscriptPage() {
             <div className="flex items-start justify-between px-6 py-4 border-b border-gray-100 dark:border-gray-700 gap-4">
               <div className="min-w-0">
                 <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-2 flex-wrap">
-                  Cleaned Transcript
+                  {videoMeta?.title ?? "Cleaned Transcript"}
                   {status.kind === "processing" && (
                     <span className="text-xs font-normal text-gray-400 dark:text-gray-500">
                       (updating live…)
@@ -583,28 +583,26 @@ export default function TranscriptPage() {
               />
             )}
 
+            {/* Speaker caveat — shown before the transcript so users see it first */}
+            {isDone && hasSpeakers && (
+              <div className="px-6 pt-4 pb-1">
+                <p className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2 leading-relaxed">
+                  <span className="font-medium">Note:</span> Speaker labels are AI-inferred and may not be accurate — YouTube transcripts contain no speaker data. Verify against the original video before publishing.
+                </p>
+              </div>
+            )}
+
             {/* Transcript body */}
             <div className="px-6 py-5">
               <TranscriptRenderer text={transcript} speakerNames={speakerNames} />
             </div>
 
-            {/* Speaker / timecode footer — only after processing is complete */}
-            {isDone && (
-              <div className="px-6 pb-5 space-y-2">
-                {hasSpeakers ? (
-                  <p className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2 leading-relaxed">
-                    <span className="font-medium">Note:</span> Speaker labels are AI-inferred and may not be accurate — YouTube transcripts contain no speaker data. Verify against the original video before publishing.
-                  </p>
-                ) : (
-                  <p className="text-xs text-gray-400 dark:text-gray-500 leading-relaxed">
-                    Speaker identification was not possible for this video.
-                  </p>
-                )}
-                {hasTimecodes && (
-                  <p className="text-xs text-gray-400 dark:text-gray-500 leading-relaxed">
-                    Timecodes are approximate and reflect the original video timestamps.
-                  </p>
-                )}
+            {/* Timecode footnote */}
+            {isDone && hasTimecodes && (
+              <div className="px-6 pb-5">
+                <p className="text-xs text-gray-400 dark:text-gray-500 leading-relaxed">
+                  Timecodes are approximate and reflect the original video timestamps.
+                </p>
               </div>
             )}
           </div>

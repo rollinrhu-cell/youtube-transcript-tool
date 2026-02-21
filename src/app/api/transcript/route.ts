@@ -78,7 +78,7 @@ async function fetchViaSupadata(
     const items = (
       content as Array<{ text: string; offset: number; duration: number }>
     )
-      .map((c) => ({ text: c.text, offset: c.offset, duration: c.duration }))
+      .map((c) => ({ text: c.text, offset: c.offset / 1000, duration: c.duration / 1000 }))
       .filter((c) => c.text.trim().length > 0);
     if (items.length === 0) throw new TranscriptsNotAvailableError(videoId);
     return items;
@@ -339,16 +339,18 @@ function sendEvent(
   controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
 }
 
-// Format a minute-boundary offset as a human-readable timecode marker.
-// Under 1 hour:  [M:00]      e.g. [0:00], [1:00], [59:00]
-// 1 hour+:       [H:MM:00]   e.g. [1:00:00], [1:30:00], [2:00:00]
-function formatTimecodeMarker(totalMinutes: number): string {
-  const h = Math.floor(totalMinutes / 60);
-  const m = totalMinutes % 60;
+// Format an offset in seconds as a human-readable timecode marker.
+// Under 1 hour:  [M:SS]     e.g. [0:00], [2:15], [12:34]
+// 1 hour+:       [H:MM:SS]  e.g. [1:00:00], [1:30:45], [2:15:30]
+function formatTimecodeMarker(totalSeconds: number): string {
+  const s = Math.floor(totalSeconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
   if (h > 0) {
-    return `[${h}:${String(m).padStart(2, "0")}:00]`;
+    return `[${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}]`;
   }
-  return `[${m}:00]`;
+  return `[${m}:${String(sec).padStart(2, "0")}]`;
 }
 
 // Returns raw text with timecode markers embedded at each minute boundary.
@@ -367,14 +369,15 @@ function buildRawText(items: TranscriptItem[]): {
     };
   }
 
-  let lastMinuteMark = -1;
+  // Insert a timecode at the very start, then every ~60 s of real content.
+  // Using the item's exact offset so the marker shows true M:SS / H:MM:SS time.
+  let lastMarkerAt = -61;
   const parts: string[] = [];
 
   for (const item of items) {
-    const minute = Math.floor(item.offset / 60);
-    if (minute > lastMinuteMark) {
-      parts.push(formatTimecodeMarker(minute));
-      lastMinuteMark = minute;
+    if (item.offset - lastMarkerAt >= 60) {
+      parts.push(formatTimecodeMarker(item.offset));
+      lastMarkerAt = item.offset;
     }
     const text = item.text.replace(/\n/g, " ").trim();
     if (text) parts.push(text);
@@ -398,7 +401,7 @@ async function cleanChunk(
         : "This is the final section of a transcript. ";
 
   const timecodeInstruction = hasTimecodes
-    ? `5. Preserve every timecode marker exactly as-is — e.g. [0:00], [1:00], [12:00], [1:00:00], [1:30:00]. Do not remove, move, or reformat them; keep each one at the point in the sentence where it naturally falls.
+    ? `5. Preserve every timecode marker exactly as-is — e.g. [0:00], [2:15], [12:34], [1:00:00], [1:30:45]. Timecodes are in [M:SS] format (under 1 hour) or [H:MM:SS] format (1 hour or more). Do not remove, reformat, or recalculate them; keep each one exactly where it appears.
 6.`
     : "5.";
 
