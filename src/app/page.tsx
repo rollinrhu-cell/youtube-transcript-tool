@@ -37,7 +37,6 @@ export default function TranscriptPage() {
   const [hasTimecodes, setHasTimecodes] = useState(false);
   const [videoMeta, setVideoMeta] = useState<VideoMeta | null>(null);
   const [copied, setCopied] = useState(false);
-  const [infoOpen, setInfoOpen] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [downloadPending, setDownloadPending] = useState<null | { type: "txt" | "docx"; suggestedName: string }>(null);
@@ -45,22 +44,11 @@ export default function TranscriptPage() {
 
   // Restore persisted preferences on mount (runs client-side only)
   useEffect(() => {
-    const storedInfo = localStorage.getItem("infoOpen");
-    if (storedInfo !== null) setInfoOpen(storedInfo !== "false");
-
     const storedDark = localStorage.getItem("darkMode");
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     const isDark = storedDark !== null ? storedDark === "true" : prefersDark;
     setDarkMode(isDark);
     document.documentElement.classList.toggle("dark", isDark);
-  }, []);
-
-  const toggleInfo = useCallback(() => {
-    setInfoOpen((v) => {
-      const next = !v;
-      localStorage.setItem("infoOpen", String(next));
-      return next;
-    });
   }, []);
 
   const toggleDark = useCallback(() => {
@@ -355,9 +343,9 @@ export default function TranscriptPage() {
   }, [status]);
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-950 transition-colors duration-200">
+    <div className="min-h-screen bg-[#FAFAF8] dark:bg-[#0F1117] transition-colors duration-200">
       {/* ── Header ──────────────────────────────────────────────────────── */}
-      <header className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 shadow-sm">
+      <header className="bg-white dark:bg-[#161B22] border-b border-gray-200 dark:border-white/[0.08] shadow-sm">
         <div className="max-w-3xl mx-auto px-4 py-4 sm:px-6">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-red-600 rounded-lg flex items-center justify-center flex-shrink-0">
@@ -366,10 +354,10 @@ export default function TranscriptPage() {
               </svg>
             </div>
             <div className="flex-1 min-w-0">
-              <h1 className="text-xl font-bold text-gray-900 dark:text-gray-50">
+              <h1 className="text-xl font-semibold tracking-tight text-gray-900 dark:text-gray-50">
                 YouTube Transcript Extractor
               </h1>
-              <p className="text-sm text-gray-500 dark:text-gray-400">
+              <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
                 Paste a YouTube URL to get a clean, readable transcript
               </p>
             </div>
@@ -395,45 +383,48 @@ export default function TranscriptPage() {
 
       <main className="max-w-3xl mx-auto px-4 sm:px-6 py-8 space-y-6">
 
-        {/* ── Collapsible info box ─────────────────────────────────────── */}
-        <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-sm overflow-hidden">
-          <button
-            onClick={toggleInfo}
-            className="w-full flex items-center gap-2 px-5 py-3 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-left"
-          >
-            <svg className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide flex-1">
-              Good to know
-            </span>
-            <svg
-              className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${infoOpen ? "" : "-rotate-90"}`}
-              fill="none" stroke="currentColor" viewBox="0 0 24 24"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
-          </button>
-          <div className={`overflow-hidden transition-all duration-300 ease-in-out ${infoOpen ? "max-h-[600px] opacity-100" : "max-h-0 opacity-0"}`}>
-            <ul className="divide-y divide-gray-100 dark:divide-gray-700">
-              <li className="px-5 py-3.5 flex gap-3">
-                <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide w-24 flex-shrink-0 pt-px">Accuracy</span>
-                <p className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed">Transcripts are cleaned up by AI and should not be treated as verbatim quotes. If quoting for publication, refer back to the original video.</p>
-              </li>
-              <li className="px-5 py-3.5 flex gap-3">
-                <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide w-24 flex-shrink-0 pt-px">Check first</span>
-                <p className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed">To confirm a video has a transcript before submitting, open it on YouTube, click the three dots <span className="font-medium text-gray-700 dark:text-gray-200">⋯</span> below the player, and select <span className="font-medium text-gray-700 dark:text-gray-200">Open transcript</span>. If that option doesn&apos;t appear, the transcript won&apos;t be available here.</p>
-              </li>
-              <li className="px-5 py-3.5 flex gap-3">
-                <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide w-24 flex-shrink-0 pt-px">Usage</span>
-                <p className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed">This tool has a monthly limit of about 100 transcripts, so please be mindful of usage.</p>
-              </li>
-            </ul>
+        {/* ── Info chips ───────────────────────────────────────────────── */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {/* Accuracy */}
+          <div className="flex gap-3 bg-white dark:bg-[#161B22] rounded-xl border border-gray-200 dark:border-white/[0.08] px-4 py-3.5">
+            <div className="w-7 h-7 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200/70 dark:border-amber-700/30 flex items-center justify-center flex-shrink-0 mt-px">
+              <svg className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-700 dark:text-gray-300">Accuracy</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 leading-relaxed">AI-cleaned — not verbatim. Verify against the original video before quoting.</p>
+            </div>
+          </div>
+          {/* Check first */}
+          <div className="flex gap-3 bg-white dark:bg-[#161B22] rounded-xl border border-gray-200 dark:border-white/[0.08] px-4 py-3.5">
+            <div className="w-7 h-7 rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-200/70 dark:border-blue-700/30 flex items-center justify-center flex-shrink-0 mt-px">
+              <svg className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-700 dark:text-gray-300">Check first</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 leading-relaxed">On YouTube, click <span className="font-medium text-gray-600 dark:text-gray-300">⋯</span> below the player and choose <span className="font-medium text-gray-600 dark:text-gray-300">Open transcript</span>. No option = no transcript here.</p>
+            </div>
+          </div>
+          {/* Usage */}
+          <div className="flex gap-3 bg-white dark:bg-[#161B22] rounded-xl border border-gray-200 dark:border-white/[0.08] px-4 py-3.5">
+            <div className="w-7 h-7 rounded-lg bg-gray-100 dark:bg-white/[0.05] border border-gray-200/70 dark:border-white/[0.08] flex items-center justify-center flex-shrink-0 mt-px">
+              <svg className="w-3.5 h-3.5 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-700 dark:text-gray-300">Usage limit</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 leading-relaxed">~100 transcripts per month. Please be mindful of usage.</p>
+            </div>
           </div>
         </div>
 
         {/* ── URL form ─────────────────────────────────────────────────── */}
-        <form onSubmit={handleSubmit} className="bg-white dark:bg-gray-900 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+        <form onSubmit={handleSubmit} className="bg-white dark:bg-[#161B22] rounded-xl shadow-sm border border-gray-200 dark:border-white/[0.08] p-6">
           <label htmlFor="yt-url" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
             YouTube URL
           </label>
@@ -463,7 +454,7 @@ export default function TranscriptPage() {
 
         {/* ── Progress indicator (loading + processing share one card) ── */}
         {(status.kind === "loading" || status.kind === "processing") && (
-          <div className="bg-white dark:bg-gray-900 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6 space-y-3">
+          <div className="bg-white dark:bg-[#161B22] rounded-xl shadow-sm border border-gray-200 dark:border-white/[0.08] p-6 space-y-3">
             <div className="flex items-center gap-4">
               <Spinner />
               <p className="text-sm text-gray-600 dark:text-gray-400 font-medium">
@@ -498,7 +489,7 @@ export default function TranscriptPage() {
 
         {/* ── Video meta: title + duration ─────────────────────────────── */}
         {videoMeta && (
-          <div className="bg-white dark:bg-gray-900 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 px-5 py-4 flex items-start gap-3">
+          <div className="bg-white dark:bg-[#161B22] rounded-xl shadow-sm border border-gray-200 dark:border-white/[0.08] px-5 py-4 flex items-start gap-3">
             <div className="w-8 h-8 bg-red-100 dark:bg-red-900/30 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5">
               <svg className="w-4 h-4 text-red-600 dark:text-red-400" fill="currentColor" viewBox="0 0 24 24">
                 <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
@@ -519,9 +510,9 @@ export default function TranscriptPage() {
 
         {/* ── Transcript output ────────────────────────────────────────── */}
         {transcript && (
-          <div className="bg-white dark:bg-gray-900 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden">
+          <div className="bg-white dark:bg-[#161B22] rounded-xl shadow-sm border border-gray-200 dark:border-white/[0.08] overflow-hidden">
             {/* Card header: title, word count, action buttons */}
-            <div className="flex items-start justify-between px-6 py-4 border-b border-gray-100 dark:border-gray-700 gap-4">
+            <div className="flex items-start justify-between px-6 py-4 border-b border-gray-100 dark:border-white/[0.06] gap-4">
               <div className="min-w-0">
                 <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-2 flex-wrap">
                   {videoMeta?.title ?? "Cleaned Transcript"}
@@ -650,7 +641,7 @@ function TranscriptRenderer({
 }) {
   const lines = text.split("\n");
   return (
-    <div className="font-sans text-sm text-gray-800 dark:text-gray-200 leading-relaxed space-y-1 whitespace-pre-wrap">
+    <div className="font-sans text-[15px] text-gray-800 dark:text-gray-200 leading-7 space-y-1 whitespace-pre-wrap">
       {lines.map((line, li) => {
         const parts = line.split(/(\[\d+:\d{2}(?::\d{2})?\])/g);
         return (
@@ -721,7 +712,7 @@ function SpeakerRenamePanel({
   if (speakers.length === 0) return null;
 
   return (
-    <div className="px-6 py-3 border-b border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
+    <div className="px-6 py-3 border-b border-gray-100 dark:border-white/[0.06] bg-gray-50/80 dark:bg-white/[0.03]">
       <p className="text-[11px] font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wide mb-2">
         Rename speakers
       </p>
