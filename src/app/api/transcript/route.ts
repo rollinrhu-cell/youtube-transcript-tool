@@ -109,7 +109,7 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&apos;/g, "'");
 }
 
-async function fetchViaAndroid(videoId: string): Promise<TranscriptItem[]> {
+async function fetchViaAndroid(videoId: string): Promise<{ items: TranscriptItem[]; meta?: VideoMeta }> {
   // Step 1: watch page → extract INNERTUBE_API_KEY + consent cookie
   const watchRes = await fetch(
     `https://www.youtube.com/watch?v=${videoId}`,
@@ -167,6 +167,12 @@ async function fetchViaAndroid(videoId: string): Promise<TranscriptItem[]> {
     throw new VideoUnavailableError(videoId);
   }
 
+  // Extract metadata from the player response we already have
+  const rawTitle: string = data?.videoDetails?.title ?? "";
+  const meta: VideoMeta | undefined = rawTitle
+    ? { title: rawTitle, durationSeconds: parseInt(data?.videoDetails?.lengthSeconds ?? "0", 10) }
+    : undefined;
+
   const captionTracks: CaptionTrack[] | undefined =
     data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
   if (!captionTracks || captionTracks.length === 0)
@@ -203,7 +209,7 @@ async function fetchViaAndroid(videoId: string): Promise<TranscriptItem[]> {
     .filter((item) => item.text.trim().length > 0);
 
   if (items.length === 0) throw new TranscriptsNotAvailableError(videoId);
-  return items;
+  return { items, meta };
 }
 
 // ── Video metadata (title + duration) ────────────────────────────────────────
@@ -211,6 +217,7 @@ async function fetchViaAndroid(videoId: string): Promise<TranscriptItem[]> {
 // metadata failure never blocks the transcript.
 
 async function fetchVideoMeta(videoId: string): Promise<VideoMeta | null> {
+  // Primary: innertube ANDROID client (returns title + duration)
   try {
     const res = await fetch(
       `https://www.youtube.com/youtubei/v1/player?key=${FALLBACK_INNERTUBE_KEY}`,
@@ -230,29 +237,47 @@ async function fetchVideoMeta(videoId: string): Promise<VideoMeta | null> {
         }),
       }
     );
-    if (!res.ok) return null;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const data: any = await res.json();
-    const title: string = data?.videoDetails?.title ?? "";
-    if (!title) return null;
-    const durationSeconds = parseInt(
-      data?.videoDetails?.lengthSeconds ?? "0",
-      10
-    );
-    return { title, durationSeconds };
+    if (res.ok) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any = await res.json();
+      const title: string = data?.videoDetails?.title ?? "";
+      if (title) {
+        const durationSeconds = parseInt(data?.videoDetails?.lengthSeconds ?? "0", 10);
+        return { title, durationSeconds };
+      }
+    }
   } catch {
-    return null;
+    // fall through to oEmbed
   }
+
+  // Fallback: oEmbed — a simple public endpoint, never blocked by cloud IPs.
+  // Returns title only (no duration), but good enough to populate the heading.
+  try {
+    const res = await fetch(
+      `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`
+    );
+    if (res.ok) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any = await res.json();
+      const title: string = data?.title ?? "";
+      if (title) return { title, durationSeconds: 0 };
+    }
+  } catch {
+    // give up
+  }
+
+  return null;
 }
 
 // ── Orchestrator ─────────────────────────────────────────────────────────────
 
-async function fetchTranscript(videoId: string): Promise<TranscriptItem[]> {
+async function fetchTranscript(videoId: string): Promise<{ items: TranscriptItem[]; meta?: VideoMeta }> {
   const supadataKey = process.env.SUPADATA_API_KEY;
 
   if (supadataKey) {
     try {
-      return await fetchViaSupadata(videoId, supadataKey);
+      const items = await fetchViaSupadata(videoId, supadataKey);
+      return { items };
     } catch (err) {
       if (err instanceof SupadataError) {
         // Definitive errors — no point falling through to direct approach
@@ -480,11 +505,15 @@ export async function POST(request: Request) {
           fetchVideoMeta(videoId),
         ]);
 
-        if (metaResult.status === "fulfilled" && metaResult.value) {
-          sendEvent(controller, encoder, {
-            type: "meta",
-            ...metaResult.value,
-          });
+        // Use fetchVideoMeta result when available; fall back to meta embedded in
+        // the transcript result (Android path already fetched player data).
+        const meta =
+          (metaResult.status === "fulfilled" && metaResult.value)
+            ? metaResult.value
+            : (transcriptResult.status === "fulfilled" ? transcriptResult.value.meta : undefined);
+
+        if (meta) {
+          sendEvent(controller, encoder, { type: "meta", ...meta });
         }
 
         let transcriptItems: TranscriptItem[];
@@ -514,7 +543,7 @@ export async function POST(request: Request) {
           controller.close();
           return;
         }
-        transcriptItems = transcriptResult.value;
+        transcriptItems = transcriptResult.value.items;
 
         if (!transcriptItems || transcriptItems.length === 0) {
           sendEvent(controller, encoder, {

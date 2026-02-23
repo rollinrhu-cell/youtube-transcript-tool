@@ -40,6 +40,7 @@ export default function TranscriptPage() {
   const [infoOpen, setInfoOpen] = useState(true);
   const [darkMode, setDarkMode] = useState(false);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
+  const [downloadPending, setDownloadPending] = useState<null | { type: "txt" | "docx"; suggestedName: string }>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   // Restore persisted preferences on mount (runs client-side only)
@@ -215,11 +216,24 @@ export default function TranscriptPage() {
     setTimeout(() => setCopied(false), 2000);
   }, [transcript, speakerNames]);
 
+  const suggestedFileName = useMemo(() => {
+    return videoMeta?.title
+      ? videoMeta.title.slice(0, 60).replace(/[^\w\s-]/g, "_").trim() || "transcript"
+      : "transcript";
+  }, [videoMeta]);
+
   const handleDownloadTxt = useCallback(() => {
     if (!transcript) return;
-    const name = videoMeta?.title
-      ? videoMeta.title.slice(0, 60).replace(/[^\w\s-]/g, "_")
-      : "transcript";
+    setDownloadPending({ type: "txt", suggestedName: suggestedFileName });
+  }, [transcript, suggestedFileName]);
+
+  const handleDownloadDocx = useCallback(() => {
+    if (!transcript) return;
+    setDownloadPending({ type: "docx", suggestedName: suggestedFileName });
+  }, [transcript, suggestedFileName]);
+
+  const executeTxtDownload = useCallback((name: string) => {
+    if (!transcript) return;
     const blob = new Blob([applyRenames(transcript, speakerNames)], { type: "text/plain;charset=utf-8" });
     const href = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -229,9 +243,10 @@ export default function TranscriptPage() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(href);
-  }, [transcript, videoMeta, speakerNames]);
+    setDownloadPending(null);
+  }, [transcript, speakerNames]);
 
-  const handleDownloadDocx = useCallback(async () => {
+  const executeDocxDownload = useCallback(async (name: string) => {
     if (!transcript) return;
     const { Document, Packer, Paragraph, TextRun } = await import("docx");
 
@@ -296,9 +311,6 @@ export default function TranscriptPage() {
 
     const blob = await Packer.toBlob(doc);
     const href = URL.createObjectURL(blob);
-    const name = videoMeta?.title
-      ? videoMeta.title.slice(0, 60).replace(/[^\w\s-]/g, "_")
-      : "transcript";
     const a = document.createElement("a");
     a.href = href;
     a.download = `${name}.docx`;
@@ -306,6 +318,7 @@ export default function TranscriptPage() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(href);
+    setDownloadPending(null);
   }, [transcript, videoMeta, speakerNames, detectedSpeakers]);
 
   const isRunning = status.kind === "loading" || status.kind === "processing";
@@ -608,6 +621,19 @@ export default function TranscriptPage() {
           </div>
         )}
       </main>
+
+      {/* ── Filename dialog ──────────────────────────────────────────────── */}
+      {downloadPending && (
+        <FileNameDialog
+          suggestedName={downloadPending.suggestedName}
+          extension={downloadPending.type}
+          onConfirm={(name) => {
+            if (downloadPending.type === "txt") executeTxtDownload(name);
+            else executeDocxDownload(name);
+          }}
+          onCancel={() => setDownloadPending(null)}
+        />
+      )}
     </div>
   );
 }
@@ -752,6 +778,72 @@ function SpeakerRenamePanel({
             </button>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+// ── FileNameDialog ────────────────────────────────────────────────────────────
+// Modal that lets the user edit the filename before downloading.
+function FileNameDialog({
+  suggestedName,
+  extension,
+  onConfirm,
+  onCancel,
+}: {
+  suggestedName: string;
+  extension: string;
+  onConfirm: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(suggestedName);
+  const trimmed = value.trim();
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-white dark:bg-gray-900 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 p-6 w-full max-w-sm"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">
+          Save as
+        </h3>
+        <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+          Edit the file name before downloading.
+        </p>
+        <div className="flex items-center gap-1.5 mb-5">
+          <input
+            autoFocus
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && trimmed) onConfirm(trimmed);
+              if (e.key === "Escape") onCancel();
+            }}
+            className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent min-w-0"
+          />
+          <span className="text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap flex-shrink-0">
+            .{extension}
+          </span>
+        </div>
+        <div className="flex gap-2 justify-end">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => { if (trimmed) onConfirm(trimmed); }}
+            disabled={!trimmed}
+            className="px-4 py-2 text-sm font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            Download
+          </button>
+        </div>
       </div>
     </div>
   );
