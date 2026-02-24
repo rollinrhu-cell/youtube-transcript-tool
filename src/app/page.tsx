@@ -40,10 +40,15 @@ export default function TranscriptPage() {
   const [darkMode, setDarkMode] = useState(false);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [downloadPending, setDownloadPending] = useState<null | { type: "txt" | "docx"; suggestedName: string }>(null);
+  const [supadataKey, setSupadataKey] = useState("");
+  const [keyOpen, setKeyOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   // Restore persisted preferences on mount (runs client-side only)
   useEffect(() => {
+    const storedKey = localStorage.getItem("supadataKey");
+    if (storedKey) { setSupadataKey(storedKey); setKeyOpen(true); }
+
     const storedDark = localStorage.getItem("darkMode");
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     const isDark = storedDark !== null ? storedDark === "true" : prefersDark;
@@ -79,7 +84,10 @@ export default function TranscriptPage() {
         const response = await fetch("/api/transcript", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: url.trim() }),
+          body: JSON.stringify({
+            url: url.trim(),
+            supadataKey: supadataKey.trim() || undefined,
+          }),
           signal: controller.signal,
         });
 
@@ -186,7 +194,7 @@ export default function TranscriptPage() {
         });
       }
     },
-    [url]
+    [url, supadataKey]
   );
 
   // Extract unique speaker labels actually present in the transcript (e.g. ["Speaker 1", "Speaker 2"])
@@ -447,9 +455,60 @@ export default function TranscriptPage() {
               {isRunning ? "Processing…" : "Extract"}
             </button>
           </div>
-          <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">
-            Supports youtube.com and youtu.be links. Works best with videos that have captions enabled.
-          </p>
+          <div className="mt-2 flex items-center justify-between">
+            <p className="text-xs text-gray-400 dark:text-gray-500">
+              Supports youtube.com and youtu.be links. Works best with videos that have captions enabled.
+            </p>
+            <button
+              type="button"
+              onClick={() => setKeyOpen((v) => !v)}
+              className="text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors flex-shrink-0 ml-3"
+            >
+              {keyOpen ? "Hide API key" : (supadataKey ? "API key set ✓" : "API key")}
+            </button>
+          </div>
+          {keyOpen && (
+            <div className="mt-3 space-y-1.5">
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-400">
+                Supadata API key
+                <span className="font-normal text-gray-400 dark:text-gray-500 ml-1">— optional, fixes YouTube IP blocks</span>
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={supadataKey}
+                  onChange={(e) => {
+                    setSupadataKey(e.target.value);
+                    localStorage.setItem("supadataKey", e.target.value);
+                  }}
+                  placeholder="Paste your key here…"
+                  autoComplete="off"
+                  className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-500 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent font-mono"
+                />
+                {supadataKey && (
+                  <button
+                    type="button"
+                    onClick={() => { setSupadataKey(""); localStorage.removeItem("supadataKey"); }}
+                    className="px-3 py-2 text-xs text-gray-500 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400 border border-gray-300 dark:border-gray-600 rounded-lg transition-colors"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              <p className="text-xs text-gray-400 dark:text-gray-500">
+                Free keys at{" "}
+                <a
+                  href="https://supadata.ai"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                >
+                  supadata.ai
+                </a>
+                . Stored locally in your browser only.
+              </p>
+            </div>
+          )}
         </form>
 
         {/* ── Progress indicator (loading + processing share one card) ── */}

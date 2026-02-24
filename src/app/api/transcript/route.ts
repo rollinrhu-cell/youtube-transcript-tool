@@ -271,8 +271,7 @@ async function fetchVideoMeta(videoId: string): Promise<VideoMeta | null> {
 
 // ── Orchestrator ─────────────────────────────────────────────────────────────
 
-async function fetchTranscript(videoId: string): Promise<{ items: TranscriptItem[]; meta?: VideoMeta }> {
-  const supadataKey = process.env.SUPADATA_API_KEY;
+async function fetchTranscript(videoId: string, supadataKey?: string): Promise<{ items: TranscriptItem[]; meta?: VideoMeta }> {
 
   if (supadataKey) {
     try {
@@ -459,9 +458,13 @@ ${chunk}`,
 
 export async function POST(request: Request) {
   let url: string;
+  let clientSupadataKey: string | undefined;
   try {
     const body = await request.json();
     url = body.url;
+    clientSupadataKey = typeof body.supadataKey === "string" && body.supadataKey.trim()
+      ? body.supadataKey.trim()
+      : undefined;
   } catch {
     return Response.json({ error: "Invalid request body" }, { status: 400 });
   }
@@ -480,6 +483,9 @@ export async function POST(request: Request) {
       { status: 400 }
     );
   }
+
+  // Prefer server-side env key; fall back to the key the user pasted in the UI
+  const supadataKey = process.env.SUPADATA_API_KEY || clientSupadataKey;
 
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   if (!anthropicKey) {
@@ -501,7 +507,7 @@ export async function POST(request: Request) {
 
         // Run meta fetch concurrently — a failure there never blocks the transcript
         const [transcriptResult, metaResult] = await Promise.allSettled([
-          fetchTranscript(videoId),
+          fetchTranscript(videoId, supadataKey),
           fetchVideoMeta(videoId),
         ]);
 
@@ -522,10 +528,10 @@ export async function POST(request: Request) {
           let userMessage: string;
           if (err instanceof IpBlockedError) {
             userMessage =
-              "YouTube is blocking this server's requests. This is a known issue with cloud-hosted services — set SUPADATA_API_KEY to route around it.";
+              "YouTube is blocking this server's requests. Enter a Supadata API key using the link below the URL field to fix this — free keys are available at supadata.ai.";
           } else if (err instanceof PoTokenRequiredError) {
             userMessage =
-              "YouTube requires a verification token for this video's transcript. Set SUPADATA_API_KEY to work around this.";
+              "YouTube requires a verification token for this video's transcript. Enter a Supadata API key using the link below the URL field to work around this.";
           } else if (err instanceof VideoUnavailableError) {
             userMessage =
               "This video is unavailable (it may be private, deleted, or region-locked).";
